@@ -82,7 +82,9 @@ input.cell {
 }
 input.cell + input.cell { margin-left: 8px; }
 
-.audit-bar { display: flex; align-items: center; gap: 14px; }
+.audit-bar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.audit-actions { display: flex; gap: 10px; }
+.limit-hint { font-size: 12px; }
 .muted { color: var(--muted); font-size: 13px; }
 .hidden { display: none; }
 
@@ -90,6 +92,10 @@ input.cell + input.cell { margin-left: 8px; }
 .errors h2 { color: var(--err); }
 .errors ul { margin: 0; padding-left: 20px; }
 .errors li { margin: 3px 0; }
+
+/* 非侵入复核分栏：左侧色条与普通审计区分 */
+.panel.non-intrusive { border-left: 3px solid var(--warn); }
+.errors.non-intrusive { border-left: 3px solid var(--err); }
 
 .result .ok { color: var(--ok); }
 .result .bad { color: var(--err); }

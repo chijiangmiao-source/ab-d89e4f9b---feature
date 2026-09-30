@@ -1,6 +1,10 @@
 // 页面状态与渲染。求解全部在 Web Worker 中完成；非法输入时合并展示并清除旧结论。
+// 普通结论（#result / #errors）与非侵入复核结论（#nonIntrusiveResult /
+// #nonIntrusiveErrors）分栏共存：任一位置、探测码或定义被修改后，非侵入结论立即
+// 作废；普通结论与原有逐轮记录仍按原规则保留。
 
 const MAX_POS = 10;
+const MAX_POS_NON_INTRUSIVE = 7;
 const MIN_CODES = 2;
 const MAX_CODES = 4;
 
@@ -19,28 +23,50 @@ const gridHead = $('#gridHead');
 const gridBody = $('#gridBody');
 const errBox = $('#errors');
 const resultBox = $('#result');
+const niErrBox = $('#nonIntrusiveErrors');
+const niBox = $('#nonIntrusiveResult');
 const statusEl = $('#workerStatus');
 
 let worker = null;
+// 全局递增请求代号；两种模式分别记录在途代号，互不抢占（标准结果不会因发起
+// 非侵入复核而被误判为陈旧，反之编辑输入只作废非侵入在途请求）。
+let requestSeq = 0;
+const pending = { audit: 0, nonIntrusive: 0 };
+
+function isBusy() {
+  return pending.audit !== 0 || pending.nonIntrusive !== 0;
+}
 
 function ensureWorker() {
   if (worker) return worker;
   worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
   worker.onmessage = ev => {
-    setBusy(false);
-    if (ev.data.type === 'error') showErrors(ev.data.messages);
+    const mode = ev.data.mode;
+    if (ev.data.seq !== pending[mode]) return; // 该模式的陈旧响应（输入已变更）：丢弃
+    pending[mode] = 0;
+    setBusy(isBusy());
+    if (ev.data.type === 'error') showErrors(ev.data.messages, mode);
     else showResult(ev.data.result);
   };
   worker.onerror = e => {
+    // Worker 致命错误无法区分模式：解除全部在途态并在两栏提示。
+    pending.audit = 0;
+    pending.nonIntrusive = 0;
     setBusy(false);
-    showErrors([`Worker 运行失败：${e.message}`]);
+    showErrors([`Worker 运行失败：${e.message}`], 'audit');
+    showErrors([`Worker 运行失败：${e.message}`], 'nonIntrusive');
   };
   return worker;
 }
 
 function setBusy(busy) {
   $('#auditBtn').disabled = busy;
-  statusEl.textContent = busy ? '搜索中…' : '';
+  $('#nonIntrusiveBtn').disabled = busy;
+  if (!busy) {
+    statusEl.textContent = '';
+    return;
+  }
+  statusEl.textContent = pending.nonIntrusive !== 0 ? '非侵入复核搜索中…' : '搜索中…';
 }
 
 // ---- 录入渲染 -------------------------------------------------------------
@@ -67,6 +93,7 @@ function renderCodes() {
         }
       }
       renderGrid(); // 表头与列随之变化
+      invalidateNonIntrusive(); // 修改探测码：非侵入结论立即失效
     });
     wrap.append(label, input);
     codeList.appendChild(wrap);
@@ -101,6 +128,7 @@ function renderGrid() {
     nameInput.placeholder = '位置名';
     nameInput.addEventListener('input', () => {
       pos.name = nameInput.value;
+      invalidateNonIntrusive(); // 修改位置：非侵入结论立即失效
     });
     tdName.appendChild(nameInput);
     tr.appendChild(tdName);
@@ -122,14 +150,24 @@ function renderGrid() {
       nIn.dataset.row = r;
       nIn.dataset.code = code;
       nIn.dataset.field = 'next';
-      rIn.addEventListener('input', () => (cell.response = rIn.value));
-      nIn.addEventListener('input', () => (cell.next = nIn.value));
+      rIn.addEventListener('input', () => {
+        cell.response = rIn.value;
+        invalidateNonIntrusive(); // 修改定义：非侵入结论立即失效
+      });
+      nIn.addEventListener('input', () => {
+        cell.next = nIn.value;
+        invalidateNonIntrusive();
+      });
       td.append(rIn, nIn);
       tr.appendChild(td);
     });
     gridBody.appendChild(tr);
   });
   $('#addPos').disabled = state.positions.length >= MAX_POS;
+  $('#niLimitHint').textContent =
+    state.positions.length > MAX_POS_NON_INTRUSIVE
+      ? `当前 ${state.positions.length} 个位置，已超过非侵入复核上限 ${MAX_POS_NON_INTRUSIVE}，该模式不受理（可发起复核查看说明）。`
+      : `仅受理不超过 ${MAX_POS_NON_INTRUSIVE} 个位置的当前机型（当前 ${state.positions.length} 个）。`;
 }
 
 function reindexCells() {
@@ -185,24 +223,51 @@ function gatherPayload() {
   return { positions, codes, table };
 }
 
-// ---- 结果展示 -------------------------------------------------------------
+// ---- 结果区清理 -----------------------------------------------------------
 
-function clearConclusions() {
-  errBox.classList.add('hidden');
-  errBox.innerHTML = '';
-  delete errBox.dataset.outcome;
-  resultBox.classList.add('hidden');
-  resultBox.innerHTML = '';
-  delete resultBox.dataset.outcome;
+function clearBox(box) {
+  box.classList.add('hidden');
+  box.innerHTML = '';
+  delete box.dataset.outcome;
 }
 
-function showErrors(messages) {
-  // 非法输入：合并显示全部问题，并清除旧结论。
-  clearConclusions();
-  errBox.classList.remove('hidden');
-  errBox.dataset.outcome = 'error';
+function clearConclusions() {
+  // 结构级变更（增删码/位置、载入示例、清空）：两类结论一并清除。
+  clearBox(errBox);
+  clearBox(resultBox);
+  clearBox(niErrBox);
+  clearBox(niBox);
+}
+
+/** 修改任一位置、探测码或定义后调用：非侵入结论立即作废（普通结论保留）。 */
+function invalidateNonIntrusive() {
+  clearBox(niErrBox);
+  clearBox(niBox);
+  // 作废在途的非侵入响应并解除其忙碌态；普通审计在途不受影响。
+  if (pending.nonIntrusive !== 0) {
+    pending.nonIntrusive = 0;
+    setBusy(isBusy());
+  }
+}
+
+function showErrors(messages, mode) {
+  // 非法输入：合并显示全部问题，只清当前模式的旧结论；另一模式的结论原样保留。
+  if (mode === 'nonIntrusive') {
+    clearBox(niErrBox);
+    clearBox(niBox);
+    renderErrorList(niErrBox, messages, '非侵入复核输入不合法');
+  } else {
+    clearBox(errBox);
+    clearBox(resultBox);
+    renderErrorList(errBox, messages, '输入不合法');
+  }
+}
+
+function renderErrorList(box, messages, titlePrefix) {
+  box.classList.remove('hidden');
+  box.dataset.outcome = 'error';
   const h = document.createElement('h2');
-  h.textContent = `输入不合法（${messages.length} 项），请修正后重新审计`;
+  h.textContent = `${titlePrefix}（${messages.length} 项），请修正后重新发起`;
   const ul = document.createElement('ul');
   ul.dataset.testid = 'error-list';
   messages.forEach(m => {
@@ -210,7 +275,7 @@ function showErrors(messages) {
     li.textContent = m;
     ul.appendChild(li);
   });
-  errBox.append(h, ul);
+  box.append(h, ul);
 }
 
 function esc(s) {
@@ -218,13 +283,21 @@ function esc(s) {
 }
 
 function showResult(r) {
-  clearConclusions();
-  resultBox.classList.remove('hidden');
-  if (r.found) renderSuccess(r);
-  else renderEquivalence(r);
+  if (r.mode === 'nonIntrusive') showNonIntrusiveResult(r);
+  else showStandardResult(r);
 }
 
-function renderSuccess(r) {
+// ---- 普通审计结果 ----------------------------------------------------------
+
+function showStandardResult(r) {
+  clearBox(errBox);
+  clearBox(resultBox);
+  resultBox.classList.remove('hidden');
+  if (r.found) renderStandardSuccess(r);
+  else renderStandardEquivalence(r);
+}
+
+function renderStandardSuccess(r) {
   resultBox.dataset.outcome = 'success';
   const len = r.sequence.length;
   resultBox.appendChild(
@@ -290,7 +363,7 @@ function renderSuccess(r) {
   resultBox.appendChild(rt);
 }
 
-function renderEquivalence(r) {
+function renderStandardEquivalence(r) {
   const eq = r.equivalence;
   resultBox.dataset.outcome = 'impossible';
   resultBox.appendChild(el('h3', {}, '❌ 不存在任何区分序列'));
@@ -383,6 +456,170 @@ function renderStructuralProof(eq) {
   resultBox.appendChild(tbl);
 }
 
+// ---- 非侵入辨识复核结果 ----------------------------------------------------
+
+function showNonIntrusiveResult(r) {
+  clearBox(niErrBox);
+  clearBox(niBox);
+  niBox.classList.remove('hidden');
+  if (r.declined) renderNonIntrusiveExceeded(r);
+  else if (r.found) renderNonIntrusiveSuccess(r);
+  else renderNonIntrusiveImpossible(r);
+}
+
+function renderNonIntrusiveExceeded(r) {
+  niBox.dataset.outcome = 'exceeded';
+  niBox.appendChild(
+    el('h3', {}, `⛔ 非侵入复核不受理：当前机型 ${r.positionCount} 个位置，超过 ${r.limit} 个上限`),
+  );
+  niBox.appendChild(
+    el('p', { className: 'muted' },
+      '非侵入辨识复核只对不超过 7 个位置的当前机型发起。请减少位置后重试，' +
+      '或使用左侧普通审计（不要求整串后归位）。本次未进行任何搜索，原有结论保持不变。'),
+  );
+}
+
+function mappingText(mapping) {
+  return mapping.map(m => `${esc(m.initial)} → ${esc(m.current)}`).join('<br>');
+}
+
+function renderNonIntrusiveSuccess(r) {
+  niBox.dataset.outcome = 'success';
+  const len = r.sequence.length;
+  niBox.appendChild(
+    el('h3', {},
+      `✅ 存在非侵入规范探测串（长度 ${len}，最短；并列方案中 ASCII 字典序最小）：` +
+      '不同初态的完整回执串两两不同，且整串执行后每个初态恰好回到自身位置'),
+  );
+  const box = document.createElement('div');
+  box.className = 'seq-box';
+  box.dataset.testid = 'ni-sequence';
+  if (len === 0) {
+    box.textContent = '（仅一个位置，空序列即满足：无需探测即已归位且无待分对）';
+  } else {
+    r.sequence.forEach((c, i) => {
+      const chip = document.createElement('span');
+      chip.className = 'seq-chip';
+      chip.textContent = JSON.stringify(c);
+      chip.title = `第 ${i + 1} 轮`;
+      box.appendChild(chip);
+    });
+  }
+  niBox.appendChild(box);
+
+  niBox.appendChild(el('h3', {}, '逐轮位置映射与仍未分开的初态对'));
+  const tbl = document.createElement('table');
+  tbl.className = 'out';
+  tbl.innerHTML =
+    '<thead><tr><th>轮次</th><th>探测码</th><th>各初态当前所在位置（完整映射）</th>' +
+    '<th>映射为恒等</th><th>本轮前未分对</th><th>本轮被回执分开</th><th>本轮后仍未分</th></tr></thead>';
+  const tb = document.createElement('tbody');
+  for (const step of r.trace) {
+    const tr = document.createElement('tr');
+    const codeCell = step.code === null ? '—' : esc(JSON.stringify(step.code));
+    tr.innerHTML =
+      `<td>${step.round}${step.round === 0 ? '（初态）' : ''}</td>` +
+      `<td class="pair">${codeCell}</td>` +
+      `<td class="pair">${mappingText(step.mapping)}</td>` +
+      `<td>${step.identity ? '✅ 是' : '❌ 否'}</td>` +
+      `<td>${step.unresolvedBefore.map(esc).join('<br>') || '—'}</td>` +
+      `<td>${
+        step.splitThisRound.map(p => `<span class="pair">${esc(p)}</span>`).join('<br>') ||
+        '<span class="muted">—</span>'
+      }</td>` +
+      `<td>${step.unresolvedAfter.map(p => `<span class="pair">${esc(p)}</span>`).join('<br>') || '✅ 全部初态已分开'}</td>`;
+    tb.appendChild(tr);
+  }
+  tbl.appendChild(tb);
+  niBox.appendChild(tbl);
+
+  niBox.appendChild(
+    el('h3', {}, '沿规范串独立复算：各初态完整回执串（两两不同）与终态位置（均回到自身）'),
+  );
+  const rt = document.createElement('table');
+  rt.className = 'out';
+  rt.innerHTML =
+    '<thead><tr><th>初态位置</th><th>逐轮回执</th><th>整串后所在位置</th><th>回到自身</th></tr></thead>';
+  const rtb = document.createElement('tbody');
+  for (const p of r.model.positions) {
+    const tr = document.createElement('tr');
+    tr.innerHTML =
+      `<td class="pair">${esc(p)}</td>` +
+      `<td class="pair">${r.receipts[p].map(esc).join(' , ') || '（空）'}</td>` +
+      `<td class="pair">${esc(p)}</td>` +
+      '<td>✅</td>';
+    rtb.appendChild(tr);
+  }
+  rt.appendChild(rtb);
+  niBox.appendChild(rt);
+}
+
+function renderNonIntrusiveImpossible(r) {
+  niBox.dataset.outcome = 'impossible';
+  const closed = r.closed;
+  niBox.appendChild(
+    el('h3', {},
+      '❌ 不存在满足非侵入约束的探测串：可达复合状态搜索已耗尽，封闭族内无终态'),
+  );
+  niBox.appendChild(el('p', { className: 'muted' }, closed.explanation));
+
+  const cond = document.createElement('ul');
+  cond.dataset.testid = 'ni-unmet';
+  closed.unmetConditions.forEach(c => {
+    const li = document.createElement('li');
+    li.className = 'bad';
+    li.textContent = `未满足的终态条件：${c}`;
+    cond.appendChild(li);
+  });
+  niBox.appendChild(cond);
+
+  niBox.appendChild(el('h3', {}, `闭合搜索范围：${closed.states.length} 个可达复合状态`));
+  // 封闭族可能很大（7 位置机型可达数万个复合状态）；表格最多展示前
+  // CLOSURE_RENDER_CAP 个（含初态，按 BFS 发现顺序），封闭性结论对全部状态成立。
+  const CLOSURE_RENDER_CAP = 200;
+  const shown = closed.states.slice(0, CLOSURE_RENDER_CAP);
+  if (closed.states.length > CLOSURE_RENDER_CAP) {
+    niBox.appendChild(
+      el('p', { className: 'muted' },
+        `状态族较大，下表按搜索发现顺序展示前 ${CLOSURE_RENDER_CAP} 个（含初态）；` +
+        `其余 ${closed.states.length - CLOSURE_RENDER_CAP} 个状态同样满足封闭性，结论不变。`),
+    );
+  }
+  const tbl = document.createElement('table');
+  tbl.className = 'out closure';
+  const codeSet = shown[0]?.branches.map(b => b.code) ?? [];
+  tbl.innerHTML =
+    '<thead><tr><th>复合状态</th><th>各初态当前位置（完整映射）</th><th>映射恒等</th>' +
+    '<th>尚未分开的初态对</th>' +
+    codeSet.map(c => `<th>施加码 ${esc(JSON.stringify(c))}</th>`).join('') +
+    '</tr></thead>';
+  const tb = document.createElement('tbody');
+  for (const st of shown) {
+    const tr = document.createElement('tr');
+    let html =
+      `<td class="pair">#${st.state}${st.state === 0 ? '（初态）' : ''}</td>` +
+      `<td class="pair">${mappingText(st.mapping)}</td>` +
+      `<td>${st.identity ? '✅ 是' : '❌ 否'}</td>` +
+      `<td>${
+        st.unresolvedPairs.map(p => `<span class="pair">${esc(p)}</span>`).join('<br>') ||
+        '<span class="muted">空（回执已两两不同）</span>'
+      }</td>`;
+    for (const br of st.branches) {
+      if (br.outcome === 'merge') {
+        html +=
+          `<td><span class="badge merge">轨迹重合，前缀作废</span><br>` +
+          `<span class="pair">${br.mergedPairs.map(esc).join('<br>')}</span></td>`;
+      } else {
+        html += `<td><span class="badge wait">转入状态 #${br.targetState}</span></td>`;
+      }
+    }
+    tr.innerHTML = html;
+    tb.appendChild(tr);
+  }
+  tbl.appendChild(tb);
+  niBox.appendChild(tbl);
+}
+
 function el(tag, attrs, text) {
   const node = document.createElement(tag);
   if (attrs) Object.assign(node, attrs);
@@ -424,11 +661,17 @@ $('#removeCode').addEventListener('click', removeCode);
 $('#addPos').addEventListener('click', addPosition);
 $('#loadDemo').addEventListener('click', loadDemo);
 $('#clearAll').addEventListener('click', clearAll);
-$('#auditBtn').addEventListener('click', () => {
-  clearConclusions();
-  setBusy(true);
-  ensureWorker().postMessage({ type: 'audit', payload: gatherPayload() });
-});
+
+function runAudit(type) {
+  const box = type === 'nonIntrusive' ? niErrBox : errBox;
+  clearBox(box);
+  pending[type] = ++requestSeq;
+  setBusy(isBusy());
+  ensureWorker().postMessage({ type, payload: gatherPayload(), seq: pending[type] });
+}
+
+$('#auditBtn').addEventListener('click', () => runAudit('audit'));
+$('#nonIntrusiveBtn').addEventListener('click', () => runAudit('nonIntrusive'));
 
 renderCodes();
 renderGrid();

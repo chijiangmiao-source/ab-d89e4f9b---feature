@@ -137,3 +137,124 @@ test.describe('规范探测串审计（浏览器）', () => {
     await expect(errors).toContainText('不是纯 ASCII');
   });
 });
+
+test.describe('非侵入辨识复核（浏览器）', () => {
+  test('成功：三位置机型给出 AA，逐轮列出位置映射，终态恒等且回执两两不同', async ({ page }) => {
+    await page.goto('/');
+    await page.click('#clearAll');
+    await page.click('#addPos'); // 三行 P1/P2/P3
+    await fillMachine(page, {
+      positions: ['P1', 'P2', 'P3'],
+      codes: ['A', 'B'],
+      rows: {
+        // A：P1/P2 互换、P3 不动；首轮 A 分出 P1，次轮 A 再分 P2/P3 并全体归位
+        P1: { A: ['0', 'P2'], B: ['0', 'P1'] },
+        P2: { A: ['1', 'P1'], B: ['1', 'P2'] },
+        P3: { A: ['1', 'P3'], B: ['0', 'P3'] },
+      },
+    });
+    await page.click('#nonIntrusiveBtn');
+
+    const box = page.locator('#nonIntrusiveResult');
+    await expect(box).toBeVisible();
+    await expect(box).toHaveAttribute('data-outcome', 'success');
+    await expect(box).toContainText('非侵入规范探测串');
+    await expect(box).toContainText('长度 2');
+    await expect(box).toContainText('恰好回到自身');
+
+    const chips = box.locator('[data-testid="ni-sequence"] .seq-chip');
+    await expect(chips).toHaveCount(2);
+    await expect(chips.nth(0)).toHaveText('"A"');
+    await expect(chips.nth(1)).toHaveText('"A"');
+
+    // 逐轮位置映射：第 1 轮 P1→P2、P2→P1（非恒等）；第 2 轮归位（恒等）
+    await expect(box).toContainText('逐轮位置映射');
+    await expect(box).toContainText('P1 → P2');
+    await expect(box).toContainText('P2 → P1');
+    await expect(box).toContainText('全部初态已分开');
+
+    // 复算回执两两不同
+    await expect(box).toContainText('完整回执串');
+    // 普通审计区无结论（未发起）
+    await expect(page.locator('#result')).toBeHidden();
+  });
+
+  test('无解：标准审计有解 B 但非侵入复核封闭族无终态，并列出未满足条件', async ({ page }) => {
+    await page.goto('/');
+    await page.click('#clearAll');
+    await fillMachine(page, {
+      positions: ['P1', 'P2'],
+      codes: ['A', 'B'],
+      rows: {
+        P1: { A: ['1', 'P2'], B: ['1', 'P1'] },
+        P2: { A: ['1', 'P1'], B: ['0', 'P1'] },
+      },
+    });
+
+    // 普通审计与非侵入复核各自发起，结论并存
+    await page.click('#auditBtn');
+    const std = page.locator('#result');
+    await expect(std).toHaveAttribute('data-outcome', 'success');
+    await expect(std.locator('[data-testid="sequence"] .seq-chip')).toHaveText(['"B"']);
+
+    await page.click('#nonIntrusiveBtn');
+    const ni = page.locator('#nonIntrusiveResult');
+    await expect(ni).toBeVisible();
+    await expect(ni).toHaveAttribute('data-outcome', 'impossible');
+    await expect(ni).toContainText('不存在满足非侵入约束的探测串');
+    await expect(ni).toContainText('封闭');
+    // 两个终态条件分别落空的说明
+    await expect(ni.locator('[data-testid="ni-unmet"]')).toContainText('映射为恒等');
+    await expect(ni.locator('[data-testid="ni-unmet"]')).toContainText('未分对');
+    // 闭合状态族表：初态恒等，且存在“空对但非恒等”状态
+    await expect(ni).toContainText('复合状态');
+
+    // 修改任一转移定义：非侵入结论立即失效；普通结论保留
+    await fillCell(page, 0, 'B', 'response', '0');
+    await expect(ni).toBeHidden();
+    await expect(std).toBeVisible();
+    await expect(std).toHaveAttribute('data-outcome', 'success');
+
+    // 恢复定义后重新发起，仍为无解（结论可重新操作获得）
+    await fillCell(page, 0, 'B', 'response', '1');
+    await page.click('#nonIntrusiveBtn');
+    await expect(ni).toBeVisible();
+    await expect(ni).toHaveAttribute('data-outcome', 'impossible');
+  });
+
+  test('超限：8 个位置不受理非侵入复核（给出说明），普通审计仍可操作', async ({ page }) => {
+    await page.goto('/');
+    await page.click('#clearAll');
+    for (let i = 0; i < 6; i++) await page.click('#addPos'); // 2 + 6 = 8 行
+    const positions = Array.from({ length: 8 }, (_, i) => `P${i + 1}`);
+    const rows = {};
+    for (let i = 0; i < 8; i++) {
+      const p = positions[i];
+      rows[p] = { A: [`r${i}`, p], B: [`s${i}`, p] }; // 自环，每位置回执互异
+    }
+    await fillMachine(page, { positions, codes: ['A', 'B'], rows });
+
+    // 限制提示
+    await expect(page.locator('#niLimitHint')).toContainText('超过非侵入复核上限 7');
+
+    await page.click('#nonIntrusiveBtn');
+    const ni = page.locator('#nonIntrusiveResult');
+    await expect(ni).toBeVisible();
+    await expect(ni).toHaveAttribute('data-outcome', 'exceeded');
+    await expect(ni).toContainText('8 个位置');
+    await expect(ni).toContainText('7 个上限');
+
+    // 普通审计不受上限影响，仍可成功（码 A 单轮即区分）
+    await page.click('#auditBtn');
+    const std = page.locator('#result');
+    await expect(std).toBeVisible();
+    await expect(std).toHaveAttribute('data-outcome', 'success');
+    await expect(std).toContainText('长度 1');
+    await expect(ni).toBeVisible(); // 超限结论不受普通审计影响
+
+    // 清空回到 2 行后，非侵入复核恢复受理（超限提示消失）
+    await page.click('#clearAll');
+    await expect(ni).toBeHidden();
+    await expect(page.locator('#niLimitHint')).toContainText('当前 2 个');
+  });
+});

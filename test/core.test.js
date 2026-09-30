@@ -2,12 +2,15 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   audit,
+  nonIntrusiveAudit,
   validateInput,
   ValidationError,
   buildPairs,
   pairIndex,
   applyCode,
   precompute,
+  stepNonIntrusive,
+  NON_INTRUSIVE_LIMIT,
 } from '../src/audit.js';
 
 // ---------------------------------------------------------------------------
@@ -454,4 +457,236 @@ test('10 位置随机机型在 2 秒内完成审计', () => {
   const ms = Date.now() - t0;
   assert.ok(ms < 2000, `耗时 ${ms}ms 超限`);
   if (r.found) assert.ok(r.sequence.length <= (n * (n - 1)) / 2);
+});
+
+// ===========================================================================
+// 非侵入辨识复核：复合状态 =（各初态当前位置完整映射，尚未分开的初态对集合）；
+// 成功当且仅当映射恒等且无未分对。
+// ===========================================================================
+
+/** 非侵入暴力预言机：长度升序、同长度 ASCII 字典序；要求回执两两不同且各初态归位。 */
+function oracleNonIntrusive(model, maxDepth) {
+  const { positions, codes, table } = model;
+  const run = (p, seq) => {
+    const out = [];
+    let cur = p;
+    for (const c of seq) {
+      out.push(table[cur][c].response);
+      cur = table[cur][c].next;
+    }
+    return { receipt: out.join('|'), end: cur };
+  };
+  const good = seq => {
+    const seen = new Set();
+    for (const p of positions) {
+      const { receipt, end } = run(p, seq);
+      if (seen.has(receipt) || end !== p) return false;
+      seen.add(receipt);
+    }
+    return true;
+  };
+  const sorted = [...codes].sort();
+  let level = [[]];
+  for (let d = 0; d <= maxDepth; d++) {
+    for (const seq of level) if (good(seq)) return seq;
+    level = level.flatMap(seq => sorted.map(c => [...seq, c]));
+  }
+  return null;
+}
+
+test('非侵入：单位置空序列即成功，终态恒等', () => {
+  const m = machine(['S'], ['A', 'B'], {
+    S: { A: ['0', 'S'], B: ['1', 'S'] },
+  });
+  const r = nonIntrusiveAudit(m);
+  assert.equal(r.found, true);
+  assert.deepEqual(r.sequence, []);
+  assert.equal(r.trace.length, 1);
+  assert.equal(r.trace[0].identity, true);
+  assert.deepEqual(r.trace[0].unresolvedAfter, []);
+});
+
+test('非侵入成功：三位置答案 AA，中途置换、终态恒等且回执两两不同', () => {
+  // A：P1/P2 互换、P3 不动；回执 0/1/1 首轮分出 P1；次轮再分 P2/P3 并全体归位。
+  const m = machine(['P1', 'P2', 'P3'], ['A', 'B'], {
+    P1: { A: ['0', 'P2'], B: ['0', 'P1'] },
+    P2: { A: ['1', 'P1'], B: ['1', 'P2'] },
+    P3: { A: ['1', 'P3'], B: ['0', 'P3'] },
+  });
+  const r = nonIntrusiveAudit(m);
+  assert.equal(r.found, true);
+  assert.deepEqual(r.sequence, ['A', 'A']);
+  // 逐轮位置映射
+  const view = t => t.mapping.map(x => `${x.initial}->${x.current}`).join(' ');
+  assert.equal(view(r.trace[0]), 'P1->P1 P2->P2 P3->P3');
+  assert.equal(r.trace[0].identity, true);
+  assert.equal(view(r.trace[1]), 'P1->P2 P2->P1 P3->P3');
+  assert.equal(r.trace[1].identity, false);
+  assert.deepEqual(r.trace[1].splitThisRound, ['P1 / P2', 'P1 / P3']);
+  assert.deepEqual(r.trace[1].unresolvedAfter, ['P2 / P3']);
+  assert.equal(view(r.trace[2]), 'P1->P1 P2->P2 P3->P3');
+  assert.equal(r.trace[2].identity, true);
+  assert.deepEqual(r.trace[2].splitThisRound, ['P2 / P3']);
+  assert.equal(r.trace[2].unresolvedAfter.length, 0);
+  // 终态回执两两不同且各自归位
+  assert.deepEqual(r.receipts.P1, ['0', '1']);
+  assert.deepEqual(r.receipts.P2, ['1', '0']);
+  assert.deepEqual(r.receipts.P3, ['1', '1']);
+  assert.deepEqual(
+    r.returnMapping.map(x => [x.initial, x.current]),
+    [['P1', 'P1'], ['P2', 'P2'], ['P3', 'P3']],
+  );
+});
+
+test('非侵入：标准审计有解（B）但非侵入无解——回执可分却无法归位', () => {
+  // B 下 P1 停在 P1（回执1）、P2 停在 P1（回执0）：能识别但 P2 未归位；
+  // A 下两者回执恒同为 1，任何含 A 的串都分不开。故非侵入无串。
+  const m = machine(['P1', 'P2'], ['A', 'B'], {
+    P1: { A: ['1', 'P2'], B: ['1', 'P1'] },
+    P2: { A: ['1', 'P1'], B: ['0', 'P1'] },
+  });
+  assert.deepEqual(audit(m).sequence, ['B']); // 普通审计确实有解并保留
+  const r = nonIntrusiveAudit(m);
+  assert.equal(r.found, false);
+  assert.equal(oracleNonIntrusive(m, 8), null);
+
+  const { states } = r.closed;
+  // 初态恒等但未分对非空；族内另有空对状态但映射非恒等——两个终态条件分别落空。
+  const s0 = states[0];
+  assert.equal(s0.identity, true);
+  assert.equal(s0.emptyPairs, false);
+  assert.ok(states.some(s => s.emptyPairs && !s.identity));
+  assert.ok(!states.some(s => s.identity && s.emptyPairs));
+  assert.ok(r.closed.unmetConditions.length >= 2);
+
+  // 封闭性独立复核：每个分支要么重合作废，要么指向族内非终态状态。
+  for (const st of states) {
+    for (const br of st.branches) {
+      if (br.outcome === 'move') {
+        assert.ok(br.targetState < states.length);
+        const tgt = states[br.targetState];
+        assert.ok(!(tgt.identity && tgt.emptyPairs));
+      } else {
+        assert.equal(br.outcome, 'merge');
+        assert.ok(br.mergedPairs.length >= 1);
+      }
+    }
+  }
+});
+
+test('非侵入无解：观测等价机型同样给出封闭族（恒等态未分对永不为空）', () => {
+  const m = machine(['P1', 'P2'], ['A', 'B'], {
+    P1: { A: ['0', 'P2'], B: ['x', 'P1'] },
+    P2: { A: ['0', 'P2'], B: ['x', 'P1'] },
+  });
+  const r = nonIntrusiveAudit(m);
+  assert.equal(r.found, false);
+  assert.equal(oracleNonIntrusive(m, 8), null);
+  assert.ok(r.closed.states.every(s => !s.emptyPairs));
+  for (const st of r.closed.states) {
+    for (const br of st.branches) {
+      if (br.outcome === 'move') assert.ok(br.targetState < r.closed.states.length);
+    }
+  }
+});
+
+test('非侵入：超过 7 个位置退回 declined，不做搜索', () => {
+  const n = NON_INTRUSIVE_LIMIT + 1;
+  const states = Array.from({ length: n }, (_, i) => `P${i + 1}`);
+  const rows = {};
+  for (const s of states) {
+    rows[s] = { A: ['0', 'P1'], B: ['1', 'P1'] };
+  }
+  const r = nonIntrusiveAudit(machine(states, ['A', 'B'], rows));
+  assert.equal(r.declined, true);
+  assert.equal(r.reason, 'too-many-positions');
+  assert.equal(r.positionCount, 8);
+  assert.equal(r.limit, 7);
+  assert.equal(r.found, undefined);
+
+  // 恰好 7 个位置正常受理
+  const ok = nonIntrusiveAudit(
+    machine(states.slice(0, 7), ['A', 'B'], Object.fromEntries(states.slice(0, 7).map(s => [s, rows[s]]))),
+  );
+  assert.equal(ok.declined, undefined);
+});
+
+test('stepNonIntrusive：推进映射、按回执剔除对、轨迹重合置 dead', () => {
+  const m = machine(['P1', 'P2', 'P3'], ['A', 'B'], {
+    P1: { A: ['0', 'P2'], B: ['0', 'P1'] },
+    P2: { A: ['1', 'P1'], B: ['1', 'P1'] }, // B 下与 P1 回执不同
+    P3: { A: ['1', 'P3'], B: ['0', 'P3'] },
+  });
+  const normalized = validateInput(m);
+  normalized.codes.sort();
+  const ctx = { ...precompute(normalized), n: 3, positions: normalized.positions };
+  const all = (1n << 3n) - 1n;
+  const a = stepNonIntrusive([0, 1, 2], all, 0, ctx);
+  assert.deepEqual(a.nextMap, [1, 0, 2]); // P1->P2, P2->P1, P3->P3
+  assert.deepEqual(a.split, [0, 1]); // 初态对 01、02 回执不同
+  assert.equal(a.dead, false);
+  assert.equal(a.nextMask, 1n << BigInt(pairIndex(1, 2, 3))); // 仅剩初态对 (P2,P3)
+
+  // 从初态直接施 B：P1 与 P2 回执不同被分；P1/P3 同回执且后继都到 P1（经各自映射），
+  // P2/P3 回执不同；无重合。
+  const b = stepNonIntrusive([0, 1, 2], all, 1, ctx);
+  assert.deepEqual(b.nextMap, [0, 0, 2]);
+  assert.deepEqual(b.split.sort(), [0, 2]);
+  assert.equal(b.dead, false);
+
+  // 构造重合：初态对在同一码下同回执且后继位置相同
+  const m2 = machine(['X', 'Y'], ['A', 'B'], {
+    X: { A: ['0', 'X'], B: ['0', 'X'] },
+    Y: { A: ['0', 'X'], B: ['1', 'Y'] },
+  });
+  const n2 = validateInput(m2);
+  n2.codes.sort();
+  const ctx2 = { ...precompute(n2), n: 2, positions: n2.positions };
+  const c = stepNonIntrusive([0, 1], 1n, 0, ctx2);
+  assert.deepEqual(c.merged, [0]);
+  assert.equal(c.dead, true);
+});
+
+test('随机机型 ×120：非侵入 BFS 与暴力预言机完全一致（含最短与 ASCII 序）', () => {
+  const codes = ['A', 'B'];
+  const states3 = ['s0', 's1', 's2'];
+  const rand = rng(20260930);
+  for (let trial = 0; trial < 120; trial++) {
+    const rows = {};
+    for (const s of states3) {
+      rows[s] = {};
+      for (const c of codes) {
+        rows[s][c] = [String(Math.floor(rand() * 2)), states3[Math.floor(rand() * 3)]];
+      }
+    }
+    const m = machine(states3, codes, rows);
+    const r = nonIntrusiveAudit(m);
+    const expected = oracleNonIntrusive(m, 6);
+    if (expected === null) {
+      assert.equal(r.found, false, `trial ${trial}：预言机找不到，BFS 却声称找到`);
+    } else {
+      assert.equal(r.found, true, `trial ${trial}：预言机找到 ${expected.join('')}`);
+      assert.deepEqual(r.sequence, expected, `trial ${trial}`);
+      // 结果必须自洽：终态恒等
+      assert.ok(r.trace[r.trace.length - 1].identity);
+      assert.equal(r.trace[r.trace.length - 1].unresolvedAfter.length, 0);
+    }
+  }
+});
+
+test('非侵入 7 位置随机机型快速完成', () => {
+  const n = 7;
+  const states = Array.from({ length: n }, (_, i) => `q${i}`);
+  const codes = ['A', 'B', 'C', 'D'];
+  const rand = rng(7777);
+  const rows = {};
+  for (const s of states) {
+    rows[s] = {};
+    for (const c of codes) rows[s][c] = [String(Math.floor(rand() * 2)), states[Math.floor(rand() * n)]];
+  }
+  const t0 = Date.now();
+  const r = nonIntrusiveAudit(machine(states, codes, rows));
+  const ms = Date.now() - t0;
+  assert.ok(ms < 2000, `耗时 ${ms}ms 超限`);
+  if (!r.found) assert.ok(r.closed.states.length >= 1);
 });

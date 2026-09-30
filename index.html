@@ -11,8 +11,10 @@
       <h1>射频切换矩阵控制器 · 规范探测串审计</h1>
       <p class="sub">
         录入至多 10 个内部位置、2~4 个 ASCII 探测码，以及每个位置对每个码的
-        <strong>确定回执</strong>与<strong>下一位置</strong>。审计将求出
+        <strong>确定回执</strong>与<strong>下一位置</strong>。<strong>普通审计</strong>将求出
         <strong>最短</strong>且按 ASCII 字典序唯一的规范探测串，或给出不可区分的最小等价类反例。
+        旁侧可发起<strong>非侵入辨识复核</strong>：在“整串执行后每个初态恰好回到自身”的约束下
+        寻找探测串（该模式仅受理不超过 7 个位置的机型）；普通结论与逐轮记录始终保留。
       </p>
     </header>
 
@@ -42,17 +44,27 @@
       </section>
 
       <section class="panel audit-bar">
-        <button type="button" id="auditBtn" class="primary">审 计</button>
+        <div class="audit-actions">
+          <button type="button" id="auditBtn" class="primary">普通审计</button>
+          <button type="button" id="nonIntrusiveBtn">非侵入辨识复核</button>
+        </div>
         <span id="workerStatus" class="muted"></span>
+        <span id="niLimitHint" class="muted limit-hint"></span>
       </section>
 
       <section id="errors" class="panel errors hidden" aria-live="polite"></section>
 
       <section id="result" class="panel result hidden" aria-live="polite"></section>
+
+      <section id="nonIntrusiveErrors" class="panel errors non-intrusive hidden" aria-live="polite"></section>
+
+      <section id="nonIntrusiveResult" class="panel result non-intrusive hidden" aria-live="polite"></section>
     </main>
 
     <footer class="muted">
-      搜索在 Web Worker 中以“未区分位置对集合”为状态进行精确广度优先搜索，并沿回溯链复算。
+      普通审计以“未区分位置对集合”为状态做精确广度优先搜索；非侵入辨识复核以
+      “各初态当前位置的完整映射 + 尚未分开的初态对”为复合状态搜索，仅在映射恒等且无未分对时成功。
+      任一位置、探测码或定义被修改后，非侵入结论立即失效。
     </footer>
 
     <script type="module" src="/src/main.js"></script>
