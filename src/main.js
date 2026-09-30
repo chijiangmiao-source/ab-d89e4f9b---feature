@@ -1,4 +1,5 @@
 // 页面状态与渲染。求解全部在 Web Worker 中完成；非法输入时合并展示并清除旧结论。
+// 普通审计结论与“非侵入辨识复核”结论分栏并存；任一录入被修改后，非侵入结论立即失效。
 
 const MAX_POS = 10;
 const MIN_CODES = 2;
@@ -19,6 +20,8 @@ const gridHead = $('#gridHead');
 const gridBody = $('#gridBody');
 const errBox = $('#errors');
 const resultBox = $('#result');
+const niBox = $('#niResult');
+const niErrBox = $('#niErrors');
 const statusEl = $('#workerStatus');
 
 let worker = null;
@@ -27,20 +30,37 @@ function ensureWorker() {
   if (worker) return worker;
   worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
   worker.onmessage = ev => {
-    setBusy(false);
+    setBusy(null, false);
     if (ev.data.type === 'error') showErrors(ev.data.messages);
-    else showResult(ev.data.result);
+    else if (ev.data.type === 'result') showResult(ev.data.result);
+    else if (ev.data.type === 'niResult') showNiResult(ev.data.result);
+    else if (ev.data.type === 'niError') showNiErrors(ev.data.messages);
   };
   worker.onerror = e => {
-    setBusy(false);
+    setBusy(null, false);
     showErrors([`Worker 运行失败：${e.message}`]);
   };
   return worker;
 }
 
-function setBusy(busy) {
-  $('#auditBtn').disabled = busy;
+function setBusy(kind, busy) {
+  if (kind === 'ni') $('#niReviewBtn').disabled = busy;
+  else if (kind === 'audit') $('#auditBtn').disabled = busy;
+  else {
+    $('#auditBtn').disabled = busy;
+    $('#niReviewBtn').disabled = busy;
+  }
   statusEl.textContent = busy ? '搜索中…' : '';
+}
+
+/** 修改任一位置、探测码或定义后，非侵入结论立即失效（普通审计结论保留）。 */
+function invalidateNonIntrusive() {
+  niBox.classList.add('hidden');
+  niBox.innerHTML = '';
+  delete niBox.dataset.outcome;
+  niErrBox.classList.add('hidden');
+  niErrBox.innerHTML = '';
+  delete niErrBox.dataset.outcome;
 }
 
 // ---- 录入渲染 -------------------------------------------------------------
@@ -66,6 +86,7 @@ function renderCodes() {
           delete pos.cells[oldCode];
         }
       }
+      invalidateNonIntrusive();
       renderGrid(); // 表头与列随之变化
     });
     wrap.append(label, input);
@@ -101,6 +122,7 @@ function renderGrid() {
     nameInput.placeholder = '位置名';
     nameInput.addEventListener('input', () => {
       pos.name = nameInput.value;
+      invalidateNonIntrusive();
     });
     tdName.appendChild(nameInput);
     tr.appendChild(tdName);
@@ -122,8 +144,14 @@ function renderGrid() {
       nIn.dataset.row = r;
       nIn.dataset.code = code;
       nIn.dataset.field = 'next';
-      rIn.addEventListener('input', () => (cell.response = rIn.value));
-      nIn.addEventListener('input', () => (cell.next = nIn.value));
+      rIn.addEventListener('input', () => {
+        cell.response = rIn.value;
+        invalidateNonIntrusive();
+      });
+      nIn.addEventListener('input', () => {
+        cell.next = nIn.value;
+        invalidateNonIntrusive();
+      });
       td.append(rIn, nIn);
       tr.appendChild(td);
     });
@@ -150,6 +178,7 @@ function addCode() {
   renderCodes();
   renderGrid();
   clearConclusions();
+  invalidateNonIntrusive();
 }
 function removeCode() {
   if (state.codes.length <= MIN_CODES) return;
@@ -158,6 +187,7 @@ function removeCode() {
   renderCodes();
   renderGrid();
   clearConclusions();
+  invalidateNonIntrusive();
 }
 function addPosition() {
   if (state.positions.length >= MAX_POS) return;
@@ -167,6 +197,7 @@ function addPosition() {
   state.positions.push({ name: `P${idx}`, cells });
   renderGrid();
   clearConclusions();
+  invalidateNonIntrusive();
 }
 
 // ---- 收集输入 -------------------------------------------------------------
@@ -390,6 +421,185 @@ function el(tag, attrs, text) {
   return node;
 }
 
+// ---- 非侵入辨识复核：结果展示 ---------------------------------------------
+// 与普通审计结论完全独立：普通结论（#result/#errors）不被复核操作清除，
+// 复核结论只写入 #niResult/#niErrors；录入修改后由 invalidateNonIntrusive 清除。
+
+function clearNiPanel() {
+  niErrBox.classList.add('hidden');
+  niErrBox.innerHTML = '';
+  delete niErrBox.dataset.outcome;
+  niBox.classList.add('hidden');
+  niBox.innerHTML = '';
+  delete niBox.dataset.outcome;
+}
+
+function showNiErrors(messages) {
+  clearNiPanel();
+  niErrBox.classList.remove('hidden');
+  niErrBox.dataset.outcome = 'error';
+  const h = document.createElement('h2');
+  h.textContent = `非侵入复核未受理（${messages.length} 项）`;
+  const ul = document.createElement('ul');
+  ul.dataset.testid = 'ni-error-list';
+  messages.forEach(m => {
+    const li = document.createElement('li');
+    li.textContent = m;
+    ul.appendChild(li);
+  });
+  niErrBox.append(h, ul);
+}
+
+function showNiResult(r) {
+  clearNiPanel();
+  niBox.classList.remove('hidden');
+  if (r.found) renderNiSuccess(r);
+  else renderNiClosed(r);
+}
+
+function renderNiSuccess(r) {
+  niBox.dataset.outcome = 'success';
+  const len = r.sequence.length;
+  niBox.appendChild(
+    el('h3', {}, `✅ 存在非侵入规范探测串（长度 ${len}，最短；并列方案中 ASCII 字典序最小）`),
+  );
+  niBox.appendChild(
+    el(
+      'p',
+      { className: 'muted' },
+      '整串执行后每个初态恰好回到自身位置，且不同初态的完整回执串两两不同；诊断结束无任何上电位置停留在别处。',
+    ),
+  );
+  const box = document.createElement('div');
+  box.className = 'seq-box';
+  box.dataset.testid = 'ni-sequence';
+  if (len === 0) {
+    box.textContent = '（仅一个位置，空序列即唯一识别且无需移动）';
+  } else {
+    r.sequence.forEach((c, i) => {
+      const chip = document.createElement('span');
+      chip.className = 'seq-chip';
+      chip.textContent = JSON.stringify(c);
+      chip.title = `第 ${i + 1} 轮`;
+      box.appendChild(chip);
+    });
+  }
+  niBox.appendChild(box);
+
+  niBox.appendChild(el('h3', {}, '逐轮：各初态当前所在位置映射 与 仍未分开的初态对'));
+  const tbl = document.createElement('table');
+  tbl.className = 'out';
+  tbl.innerHTML =
+    '<thead><tr><th>轮次</th><th>探测码</th><th>本轮前位置映射（初态→当前）</th>' +
+    '<th>本轮后位置映射（初态→当前）</th><th>本轮被回执分开</th><th>本轮后仍未分</th></tr></thead>';
+  const tb = document.createElement('tbody');
+  if (r.trace.length === 0) tb.innerHTML = '<tr><td colspan="6">无需探测轮次。</td></tr>';
+  for (const step of r.trace) {
+    const fmtMap = m =>
+      m
+        .map(({ from, to }) =>
+          from === to
+            ? `<span class="pair">${esc(from)}→${esc(to)}</span>`
+            : `<span class="pair bad">${esc(from)}→${esc(to)}</span>`,
+        )
+        .join('<br>');
+    const tr = document.createElement('tr');
+    tr.innerHTML =
+      `<td>${step.round}</td>` +
+      `<td class="pair">${esc(JSON.stringify(step.code))}</td>` +
+      `<td>${fmtMap(step.mappingBefore)}</td>` +
+      `<td>${fmtMap(step.mappingAfter)}${step.identityAfter ? '<br><span class="muted">已恒等</span>' : ''}</td>` +
+      `<td>${
+        step.splitThisRound.map(p => `<span class="pair">${esc(p)}</span>`).join('<br>') ||
+        '<span class="muted">—</span>'
+      }</td>` +
+      `<td>${step.unresolvedAfter.map(p => `<span class="pair">${esc(p)}</span>`).join('<br>') || '✅ 无未分对'}</td>`;
+    tb.appendChild(tr);
+  }
+  tbl.appendChild(tb);
+  niBox.appendChild(tbl);
+
+  niBox.appendChild(el('h3', {}, '沿规范串复算：每个初态的完整回执串与终局位置'));
+  const rt = document.createElement('table');
+  rt.className = 'out';
+  rt.innerHTML = '<thead><tr><th>初态位置</th><th>逐轮回执</th><th>终局位置</th></tr></thead>';
+  const rtb = document.createElement('tbody');
+  for (const p of r.model.positions) {
+    const tr = document.createElement('tr');
+    tr.innerHTML =
+      `<td class="pair">${esc(p)}</td>` +
+      `<td class="pair">${r.receipts[p].map(esc).join(' , ') || '（空）'}</td>` +
+      `<td class="pair ${r.endAt[p] === p ? 'ok' : 'bad'}">${esc(r.endAt[p])}${
+        r.endAt[p] === p ? ' ✅ 回到自身' : ' ❌ 未复位'
+      }</td>`;
+    rtb.appendChild(tr);
+  }
+  rt.appendChild(rtb);
+  niBox.appendChild(rt);
+}
+
+function renderNiClosed(r) {
+  niBox.dataset.outcome = 'impossible';
+  const cs = r.closedSearch;
+  niBox.appendChild(el('h3', {}, '❌ 不存在满足非侵入约束的固定探测串'));
+  niBox.appendChild(el('p', { className: 'muted' }, cs.explanation));
+
+  const req = document.createElement('p');
+  req.innerHTML =
+    '终态须同时满足：<ol style="margin:4px 0 0 18px">' +
+    cs.terminalRequirements.map(t => `<li>${esc(t)}</li>`).join('') +
+    '</ol>';
+  niBox.appendChild(req);
+
+  niBox.appendChild(
+    el('h3', {}, `闭合搜索范围：${cs.states.length} 个可达复合状态（映射 × 未分初态对）`),
+  );
+  const tbl = document.createElement('table');
+  tbl.className = 'out';
+  const codeCols = cs.states[0]?.branches.map(b => b.code) ?? [];
+  tbl.innerHTML =
+    '<thead><tr><th>状态</th><th>位置映射（初态→当前）</th><th>未分初态对</th><th>未满足的终态条件</th>' +
+    codeCols.map(c => `<th>码 ${esc(JSON.stringify(c))}</th>`).join('') +
+    '</tr></thead>';
+  const tb = document.createElement('tbody');
+  for (const st of cs.states) {
+    const tr = document.createElement('tr');
+    const mapHtml = st.mapping
+      .map(({ from, to }) =>
+        from === to
+          ? `<span class="pair">${esc(from)}→${esc(to)}</span>`
+          : `<span class="pair bad">${esc(from)}→${esc(to)}</span>`,
+      )
+      .join('<br>');
+    const unmetHtml = st.unmetConditions
+      .map(u =>
+        u === 'mapping'
+          ? '<span class="badge merge">映射非恒等</span>'
+          : '<span class="badge merge">仍有未分对</span>',
+      )
+      .join('<br>');
+    let html =
+      `<td class="pair">#${st.state}${st.state === 0 ? '（初态）' : ''}</td>` +
+      `<td>${mapHtml}</td>` +
+      `<td>${st.unresolvedPairs.map(p => `<span class="pair">${esc(p)}</span>`).join('<br>') || '—'}</td>` +
+      `<td>${unmetHtml}</td>`;
+    for (const br of st.branches) {
+      if (br.outcome === 'merge') {
+        html +=
+          `<td><span class="badge merge">轨迹重合</span><br>` +
+          `<span class="pair">${br.mergedPairs.map(esc).join('<br>')}</span><br>` +
+          `<span class="muted">此后永不可分</span></td>`;
+      } else {
+        html += `<td><span class="badge wait">转入状态 #${br.targetState}</span></td>`;
+      }
+    }
+    tr.innerHTML = html;
+    tb.appendChild(tr);
+  }
+  tbl.appendChild(tb);
+  niBox.appendChild(tbl);
+}
+
 // ---- 示例 -----------------------------------------------------------------
 
 function loadDemo() {
@@ -406,6 +616,7 @@ function loadDemo() {
   renderCodes();
   renderGrid();
   clearConclusions();
+  invalidateNonIntrusive();
 }
 
 function clearAll() {
@@ -415,6 +626,7 @@ function clearAll() {
   renderCodes();
   renderGrid();
   clearConclusions();
+  invalidateNonIntrusive();
 }
 
 // ---- 事件 -----------------------------------------------------------------
@@ -426,8 +638,14 @@ $('#loadDemo').addEventListener('click', loadDemo);
 $('#clearAll').addEventListener('click', clearAll);
 $('#auditBtn').addEventListener('click', () => {
   clearConclusions();
-  setBusy(true);
+  setBusy('audit', true);
   ensureWorker().postMessage({ type: 'audit', payload: gatherPayload() });
+});
+$('#niReviewBtn').addEventListener('click', () => {
+  // 非侵入复核在普通审计结论旁发起：不清空、不覆盖普通结论与逐轮记录。
+  clearNiPanel();
+  setBusy('ni', true);
+  ensureWorker().postMessage({ type: 'nonIntrusiveReview', payload: gatherPayload() });
 });
 
 renderCodes();

@@ -11,8 +11,10 @@
       <h1>射频切换矩阵控制器 · 规范探测串审计</h1>
       <p class="sub">
         录入至多 10 个内部位置、2~4 个 ASCII 探测码，以及每个位置对每个码的
-        <strong>确定回执</strong>与<strong>下一位置</strong>。审计将求出
+        <strong>确定回执</strong>与<strong>下一位置</strong>。普通审计将求出
         <strong>最短</strong>且按 ASCII 字典序唯一的规范探测串，或给出不可区分的最小等价类反例。
+        旁边可发起<strong>非侵入辨识复核</strong>（仅受理不超过 7 个位置的当前机型）：
+        额外要求整串执行后每个初态恰好回到自身位置；普通审计结论与逐轮记录始终保留。
       </p>
     </header>
 
@@ -43,16 +45,25 @@
 
       <section class="panel audit-bar">
         <button type="button" id="auditBtn" class="primary">审 计</button>
+        <button type="button" id="niReviewBtn" class="ni">非侵入辨识复核（≤7 位置）</button>
+        <span id="niHint" class="muted">
+          复核额外要求整串后各初态恰好回到自身位置；普通审计结论始终保留，修改任一录入后复核结论立即失效。
+        </span>
         <span id="workerStatus" class="muted"></span>
       </section>
 
       <section id="errors" class="panel errors hidden" aria-live="polite"></section>
 
       <section id="result" class="panel result hidden" aria-live="polite"></section>
+
+      <section id="niErrors" class="panel errors hidden" aria-live="polite"></section>
+
+      <section id="niResult" class="panel result ni-panel hidden" aria-live="polite"></section>
     </main>
 
     <footer class="muted">
-      搜索在 Web Worker 中以“未区分位置对集合”为状态进行精确广度优先搜索，并沿回溯链复算。
+      普通审计以“未区分位置对集合”为状态做精确广度优先搜索；非侵入复核以“各初态当前位置的完整映射 ×
+      未分初态对”为复合状态搜索，仅当映射回到恒等且无未分对时成功；两者均在 Web Worker 中运行。
     </footer>
 
     <script type="module" src="/src/main.js"></script>

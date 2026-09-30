@@ -66,6 +66,11 @@ button.primary {
   color: #0b1220; font-weight: 700; padding: 9px 34px;
 }
 button.primary:hover { filter: brightness(1.1); }
+button.ni {
+  background: #1c2c4d; border-color: var(--accent);
+  color: var(--text); font-weight: 600; padding: 9px 20px;
+}
+button.ni:hover { filter: brightness(1.15); }
 button.ghost { background: transparent; }
 button:disabled { opacity: .45; cursor: not-allowed; }
 
