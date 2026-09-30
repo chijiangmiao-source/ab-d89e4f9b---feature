@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>射频切换矩阵 · 规范探测串审计</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>射频切换矩阵控制器 · 规范探测串审计</h1>
+      <p class="sub">
+        录入至多 10 个内部位置、2~4 个 ASCII 探测码，以及每个位置对每个码的
+        <strong>确定回执</strong>与<strong>下一位置</strong>。审计将求出
+        <strong>最短</strong>且按 ASCII 字典序唯一的规范探测串，或给出不可区分的最小等价类反例。
+      </p>
+    </header>
+
+    <main>
+      <section class="panel" aria-labelledby="h-codes">
+        <h2 id="h-codes">探测码（2~4 个，ASCII）</h2>
+        <div id="codeList" class="code-list"></div>
+        <div class="row-actions">
+          <button type="button" id="addCode">＋ 添加探测码</button>
+          <button type="button" id="removeCode" class="ghost">－ 移除最后一个</button>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="h-pos">
+        <h2 id="h-pos">位置与转移（至多 10 个位置）</h2>
+        <div class="table-wrap">
+          <table id="grid">
+            <thead id="gridHead"></thead>
+            <tbody id="gridBody"></tbody>
+          </table>
+        </div>
+        <div class="row-actions">
+          <button type="button" id="addPos">＋ 添加位置</button>
+          <button type="button" id="loadDemo">载入示例</button>
+          <button type="button" id="clearAll" class="ghost">清空</button>
+        </div>
+      </section>
+
+      <section class="panel audit-bar">
+        <button type="button" id="auditBtn" class="primary">审 计</button>
+        <span id="workerStatus" class="muted"></span>
+      </section>
+
+      <section id="errors" class="panel errors hidden" aria-live="polite"></section>
+
+      <section id="result" class="panel result hidden" aria-live="polite"></section>
+    </main>
+
+    <footer class="muted">
+      搜索在 Web Worker 中以“未区分位置对集合”为状态进行精确广度优先搜索，并沿回溯链复算。
+    </footer>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

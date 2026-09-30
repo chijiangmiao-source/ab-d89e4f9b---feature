@@ -1,0 +1,36 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: matrix-audit-web
+    ports:
+      # 宿主机端口可通过环境变量 HOST_PORT 配置，默认 8080
+      - "${HOST_PORT:-8080}:8080"
+    environment:
+      PORT: "8080"
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 3s
+
+  verify:
+    build:
+      context: .
+      dockerfile: Dockerfile.verify
+    image: matrix-audit-verify
+    environment:
+      WEB_URL: "http://web:8080"
+      CI: "true"
+    depends_on:
+      web:
+        condition: service_healthy
+    # 一次性任务：完成代码测试、构建检查、HTTP 冒烟与浏览器操作后退出并报告状态
+    restart: "no"

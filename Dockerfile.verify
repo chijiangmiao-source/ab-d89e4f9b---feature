@@ -1,0 +1,17 @@
+# 验证镜像：基于 Playwright 官方镜像（含 Chromium 与系统依赖）
+FROM mcr.microsoft.com/playwright:v1.50.0-jammy
+
+WORKDIR /app
+ENV CI=true
+
+COPY package.json package-lock.json* ./
+RUN npm ci || npm install
+RUN npx playwright install --with-deps chromium
+
+COPY . .
+
+COPY docker/verify-entrypoint.sh /usr/local/bin/verify-entrypoint.sh
+RUN chmod +x /usr/local/bin/verify-entrypoint.sh
+
+# 一次性任务：测试 → 构建 → 冒烟 → 浏览器操作，全部通过后以 0 退出
+CMD ["/usr/local/bin/verify-entrypoint.sh"]
